@@ -529,3 +529,975 @@ def detail_panel(node_name, matrices, tokens, seq_len, d_model, d_head):
         yaxis=dict(autorange="reversed"),
     )
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Post-context flow
+# ---------------------------------------------------------------------------
+
+POST_CONTEXT_LAYOUT = {
+    "C":          dict(cx=0.045, cy=0.52, w=0.062, h=0.145, nt="context"),
+    "MLP":        dict(cx=0.155, cy=0.52, w=0.075, h=0.115, nt="module", param=True),
+    "FFNOut":     dict(cx=0.265, cy=0.52, w=0.062, h=0.145, nt="ffn"),
+    "BlockOut":   dict(cx=0.375, cy=0.52, w=0.062, h=0.145, nt="block"),
+    "StackOut":   dict(cx=0.485, cy=0.52, w=0.062, h=0.145, nt="block", param=True),
+    "FinalNorm":  dict(cx=0.595, cy=0.52, w=0.062, h=0.145, nt="norm", param=True),
+    "Logits":     dict(cx=0.710, cy=0.52, w=0.074, h=0.145, nt="logits", param=True),
+    "LastLogits": dict(cx=0.840, cy=0.52, w=0.080, h=0.075, nt="last"),
+    "Probs":      dict(cx=0.950, cy=0.52, w=0.070, h=0.075, nt="probs"),
+}
+
+POST_CONTEXT_ROLES = {
+    "C":          ("Context Matrix", "from attention"),
+    "MLP":        ("Feed-Forward Network", "learned MLP weights"),
+    "FFNOut":     ("FFN Output", "same shape as C"),
+    "BlockOut":   ("Block Output", "residual + norm"),
+    "StackOut":   ("Block Stack", "more learned blocks"),
+    "FinalNorm":  ("Final Norm", "learned scale/shift"),
+    "Logits":     ("Vocabulary Logits", "learned output projection"),
+    "LastLogits": ("Last Row", "used for next token"),
+    "Probs":      ("Probabilities", "softmax"),
+}
+
+_POST_CONTEXT_COLOR = {
+    "context": "#a04000",
+    "module": "#6c3483",
+    "ffn": "#7d3c98",
+    "block": "#1a5276",
+    "norm": "#117a65",
+    "logits": "#b7770d",
+    "last": "#c0392b",
+    "probs": "#2e86c1",
+}
+
+POST_CONTEXT_EDGES = [
+    ("C", "MLP", "C->MLP", "into FFN"),
+    ("MLP", "FFNOut", "MLP->FFNOut", "MLP output"),
+    ("FFNOut", "BlockOut", "FFNOut->BlockOut", "residual + norm"),
+    ("BlockOut", "StackOut", "BlockOut->StackOut", "repeat blocks"),
+    ("StackOut", "FinalNorm", "StackOut->FinalNorm", "final norm"),
+    ("FinalNorm", "Logits", "FinalNorm->Logits", "output layer"),
+    ("Logits", "LastLogits", "Logits->LastLogits", "keep last row"),
+    ("LastLogits", "Probs", "LastLogits->Probs", "softmax"),
+]
+
+
+def _post_bounds(name):
+    n = POST_CONTEXT_LAYOUT[name]
+    hw, hh = n["w"] / 2, n["h"] / 2
+    return n["cx"] - hw, n["cy"] - hh, n["cx"] + hw, n["cy"] + hh
+
+
+def _post_port(name, side):
+    x0, y0, x1, y1 = _post_bounds(name)
+    py = (y0 + y1) / 2
+    return (x1, py) if side == "right" else (x0, py)
+
+
+def _post_shape_label(name, mat):
+    rows, cols = mat.shape
+    return f"{rows}×{cols}"
+
+
+def post_context_diagram(matrices, active_nodes, active_edges, tokens,
+                         fig_width=1400, fig_height=460):
+    active_node_set = set(active_nodes)
+    active_edge_set = set(active_edges)
+    shapes = []
+    annotations = []
+    traces = []
+
+    for name, layout in POST_CONTEXT_LAYOUT.items():
+        is_active = name in active_node_set
+        color = _POST_CONTEXT_COLOR[layout["nt"]]
+        has_params = layout.get("param", False)
+        x0, y0, x1, y1 = _post_bounds(name)
+
+        shapes.append(dict(
+            type="rect", xref="paper", yref="paper",
+            x0=x0, y0=y0, x1=x1, y1=y1,
+            fillcolor=_rgba(color, 0.12 if is_active else 0.035),
+            line=dict(color=_rgba(color, 1.0 if is_active else 0.18),
+                      width=2.4 if is_active else 1.0,
+                      dash="dash" if has_params else "solid"),
+            layer="below",
+        ))
+
+        role, formula = POST_CONTEXT_ROLES[name]
+        annotations.append(dict(
+            xref="paper", yref="paper", x=layout["cx"], y=y1 + 0.030,
+            yanchor="bottom", showarrow=False, align="center",
+            text=(f"<span style='font-size:18px;font-weight:800;color:{color if is_active else _rgba(color, 0.30)}'>{name}</span>"
+                  f"<br><span style='font-size:12px;color:{'#333' if is_active else '#ccc'}'>{role}</span>"),
+        ))
+
+        mat = matrices.get(name)
+        if mat is not None:
+            annotations.append(dict(
+                xref="paper", yref="paper", x=layout["cx"], y=y0 - 0.026,
+                yanchor="top", showarrow=False, align="center",
+                text=(f"<span style='font-size:11px;color:{'#333' if is_active else '#bbb'}'>[{_post_shape_label(name, mat)}]</span>"
+                      f"<br><span style='font-size:10px;color:{'#666' if is_active else '#ddd'}'>{formula}</span>"),
+            ))
+        elif layout["nt"] == "module":
+            annotations.append(dict(
+                xref="paper", yref="paper", x=layout["cx"], y=layout["cy"],
+                showarrow=False, align="center",
+                text=("<span style='font-size:11px;font-weight:700'>Linear</span>"
+                      "<br><span style='font-size:10px'>activation</span>"
+                      "<br><span style='font-size:11px;font-weight:700'>Linear</span>"),
+                font=dict(color=_rgba(color, 1.0 if is_active else 0.28)),
+            ))
+
+        if has_params:
+            annotations.append(dict(
+                xref="paper", yref="paper", x=layout["cx"], y=y0 - 0.052,
+                yanchor="top", showarrow=False, align="center",
+                text=f"<span style='font-size:9px;color:{color if is_active else _rgba(color, 0.25)}'>learned params</span>",
+            ))
+
+    for src, dst, edge_key, label in POST_CONTEXT_EDGES:
+        is_active = edge_key in active_edge_set
+        alpha = 0.86 if is_active else 0.10
+        width = 2.0 if is_active else 0.7
+        sx, sy = _post_port(src, "right")
+        dx, dy = _post_port(dst, "left")
+        if edge_key == "C->MLP" and "C" in matrices:
+            rows = matrices["C"].shape[0]
+            x0_c, y0_c, x1_c, y1_c = _post_bounds("C")
+            lane_count = min(rows, 8)
+            for r in range(lane_count):
+                row_y = y0_c + ((r + 0.5) / rows) * (y1_c - y0_c)
+                path = _bezier_path(x1_c, row_y, dx, row_y, "short")
+                shapes.append(dict(
+                    type="path", xref="paper", yref="paper", path=path,
+                    fillcolor="rgba(0,0,0,0)",
+                    line=dict(color=_rgba("#1c2833", alpha), width=max(width - 0.2, 0.6)),
+                    layer="above",
+                ))
+                annotations.append(dict(
+                    xref="paper", yref="paper", x=dx, y=row_y,
+                    ax=-16, ay=0, axref="pixel", ayref="pixel",
+                    showarrow=True, arrowhead=3, arrowsize=0.75, arrowwidth=max(width - 0.2, 0.6),
+                    arrowcolor=_rgba("#1c2833", alpha), text="",
+                ))
+        else:
+            path = _bezier_path(sx, sy, dx, dy, "short")
+            shapes.append(dict(
+                type="path", xref="paper", yref="paper", path=path,
+                fillcolor="rgba(0,0,0,0)",
+                line=dict(color=_rgba("#1c2833", alpha), width=width),
+                layer="above",
+            ))
+            annotations.append(dict(
+                xref="paper", yref="paper", x=dx, y=dy,
+                ax=-16, ay=0, axref="pixel", ayref="pixel",
+                showarrow=True, arrowhead=3, arrowsize=0.9, arrowwidth=width,
+                arrowcolor=_rgba("#1c2833", alpha), text="",
+            ))
+        if is_active:
+            annotations.append(dict(
+                xref="paper", yref="paper", x=(sx + dx) / 2, y=sy + 0.052,
+                text=f"<b>{label}</b>", showarrow=False,
+                bgcolor="rgba(255,255,255,0.90)", borderpad=2,
+                font=dict(size=10, color="#1c2833"),
+            ))
+            if edge_key == "C->MLP":
+                annotations.append(dict(
+                    xref="paper", yref="paper", x=(sx + dx) / 2, y=sy - 0.074,
+                    text="<span style='font-size:10px'>same MLP reused for every row</span>",
+                    showarrow=False,
+                    bgcolor="rgba(255,255,255,0.90)",
+                    borderpad=2,
+                    font=dict(color="#1c2833"),
+                ))
+
+    node_list = list(POST_CONTEXT_LAYOUT.keys())
+    for name, layout in POST_CONTEXT_LAYOUT.items():
+        mat = matrices.get(name)
+        if mat is None:
+            continue
+        is_active = name in active_node_set
+        display = mat.copy().astype(float)
+        rows, cols = display.shape
+        hover = [[f"<b>{name}[{r},{c}]</b><br>{display[r, c]:.4f}"
+                  for c in range(cols)] for r in range(rows)]
+
+        idx = node_list.index(name)
+        xax = "x" if idx == 0 else f"x{idx+1}"
+        yax = "y" if idx == 0 else f"y{idx+1}"
+        xak = "xaxis" if idx == 0 else f"xaxis{idx+1}"
+        yak = "yaxis" if idx == 0 else f"yaxis{idx+1}"
+        x0, y0, x1, y1 = _post_bounds(name)
+
+        row_labels = [tokens[r] if r < len(tokens) else str(r) for r in range(rows)]
+        if name in ("LastLogits", "Probs"):
+            row_labels = ["last"]
+        col_labels = [f"v{c}" for c in range(cols)]
+
+        trace = go.Heatmap(
+            z=display,
+            colorscale="Blues" if name == "Probs" else "Viridis",
+            showscale=False,
+            opacity=0.92 if is_active else 0.18,
+            hoverinfo="text",
+            hovertemplate="%{text}<extra></extra>",
+            text=hover,
+            x=col_labels,
+            y=row_labels,
+            xaxis=xax,
+            yaxis=yax,
+        )
+        traces.append((trace, xak, yak, x0, y0, x1, y1))
+
+    layout_args = dict(
+        paper_bgcolor="white", plot_bgcolor="white",
+        width=fig_width, height=fig_height,
+        margin=dict(l=8, r=8, t=70, b=58),
+        showlegend=False,
+        shapes=shapes,
+        annotations=annotations,
+    )
+
+    for _, xak, yak, x0, y0, x1, y1 in traces:
+        layout_args[xak] = dict(
+            domain=[x0, x1], showticklabels=False,
+            showgrid=False, zeroline=False, fixedrange=True,
+        )
+        layout_args[yak] = dict(
+            domain=[y0, y1], showticklabels=False,
+            showgrid=False, zeroline=False, fixedrange=True,
+            autorange="reversed",
+        )
+
+    return go.Figure(data=[t[0] for t in traces], layout=go.Layout(**layout_args))
+
+
+def post_context_detail_panel(node_name, matrices, tokens):
+    mat = matrices.get(node_name)
+    if mat is None:
+        role, formula = POST_CONTEXT_ROLES.get(node_name, ("", ""))
+        fig = go.Figure()
+        fig.update_layout(
+            title=dict(
+                text=f"<b>{node_name}</b>  <span style='color:#888'>{role}</span>",
+                font=dict(size=12),
+            ),
+            height=270,
+            margin=dict(l=20, r=20, t=48, b=20),
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            annotations=[
+                dict(
+                    x=0.5,
+                    y=0.58,
+                    xref="paper",
+                    yref="paper",
+                    text="Linear → activation → Linear",
+                    showarrow=False,
+                    font=dict(size=16, color="#333"),
+                ),
+                dict(
+                    x=0.5,
+                    y=0.42,
+                    xref="paper",
+                    yref="paper",
+                    text=formula,
+                    showarrow=False,
+                    font=dict(size=12, color="#777"),
+                ),
+            ],
+        )
+        return fig
+
+    display = mat.copy().astype(float)
+    rows, cols = display.shape
+    role, formula = POST_CONTEXT_ROLES.get(node_name, ("", ""))
+    title_text = f"<b>{node_name}</b>  <span style='color:#888'>{role}  [{rows}×{cols}]</span>"
+    if formula:
+        title_text += f"   <span style='color:#aaa'>{formula}</span>"
+
+    row_labels = [tokens[r] if r < len(tokens) else str(r) for r in range(rows)]
+    if node_name in ("LastLogits", "Probs"):
+        row_labels = ["last"]
+    col_labels = [f"v{c}" for c in range(cols)]
+    hover = [[f"{display[r, c]:.4f}" for c in range(cols)] for r in range(rows)]
+
+    fig = go.Figure(go.Heatmap(
+        z=display,
+        colorscale="Blues" if node_name == "Probs" else "Viridis",
+        showscale=True,
+        hovertemplate="%{text}<extra></extra>",
+        text=hover,
+        x=col_labels,
+        y=row_labels,
+    ))
+    fig.update_layout(
+        title=dict(text=title_text, font=dict(size=12)),
+        height=270,
+        margin=dict(l=50, r=10, t=48, b=30),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Multi-head attention flow
+# ---------------------------------------------------------------------------
+
+MULTI_HEAD_LAYOUT = {
+    "X":      dict(cx=0.030, cy=0.50, w=0.045, h=0.105, nt="input"),
+    "Wq1":    dict(cx=0.125, cy=0.900, w=0.040, h=0.060, nt="param", param=True),
+    "Wk1":    dict(cx=0.125, cy=0.770, w=0.040, h=0.060, nt="param", param=True),
+    "Wv1":    dict(cx=0.125, cy=0.640, w=0.040, h=0.060, nt="param", param=True),
+    "Q1":     dict(cx=0.220, cy=0.900, w=0.042, h=0.060, nt="activation"),
+    "K1":     dict(cx=0.220, cy=0.770, w=0.042, h=0.060, nt="activation"),
+    "V1":     dict(cx=0.220, cy=0.640, w=0.042, h=0.060, nt="activation"),
+    "A1":     dict(cx=0.385, cy=0.770, w=0.052, h=0.095, nt="attn"),
+    "C1":     dict(cx=0.530, cy=0.770, w=0.052, h=0.095, nt="output"),
+    "Wq2":    dict(cx=0.125, cy=0.360, w=0.040, h=0.060, nt="param", param=True),
+    "Wk2":    dict(cx=0.125, cy=0.230, w=0.040, h=0.060, nt="param", param=True),
+    "Wv2":    dict(cx=0.125, cy=0.100, w=0.040, h=0.060, nt="param", param=True),
+    "Q2":     dict(cx=0.220, cy=0.360, w=0.042, h=0.060, nt="activation"),
+    "K2":     dict(cx=0.220, cy=0.230, w=0.042, h=0.060, nt="activation"),
+    "V2":     dict(cx=0.220, cy=0.100, w=0.042, h=0.060, nt="activation"),
+    "A2":     dict(cx=0.385, cy=0.230, w=0.052, h=0.095, nt="attn"),
+    "C2":     dict(cx=0.530, cy=0.230, w=0.052, h=0.095, nt="output"),
+    "Concat": dict(cx=0.675, cy=0.50, w=0.064, h=0.175, nt="concat"),
+    "Wo":     dict(cx=0.800, cy=0.50, w=0.056, h=0.085, nt="param", param=True),
+    "MHAOut": dict(cx=0.940, cy=0.50, w=0.064, h=0.115, nt="output"),
+}
+
+MULTI_HEAD_ROLES = {
+    "X":      ("Input", "shared by heads"),
+    "Wq1":    ("Query Weight", "head 1"),
+    "Wk1":    ("Key Weight", "head 1"),
+    "Wv1":    ("Value Weight", "head 1"),
+    "Q1":     ("Head 1 Query", "X @ Wq1"),
+    "K1":     ("Head 1 Key", "X @ Wk1"),
+    "V1":     ("Head 1 Value", "X @ Wv1"),
+    "A1":     ("Head 1 Weights", "softmax(Q1K1ᵀ)"),
+    "C1":     ("Head 1 Context", "A1 @ V1"),
+    "Wq2":    ("Query Weight", "head 2"),
+    "Wk2":    ("Key Weight", "head 2"),
+    "Wv2":    ("Value Weight", "head 2"),
+    "Q2":     ("Head 2 Query", "X @ Wq2"),
+    "K2":     ("Head 2 Key", "X @ Wk2"),
+    "V2":     ("Head 2 Value", "X @ Wv2"),
+    "A2":     ("Head 2 Weights", "softmax(Q2K2ᵀ)"),
+    "C2":     ("Head 2 Context", "A2 @ V2"),
+    "Concat": ("Concatenate", "[C1 | C2]"),
+    "Wo":     ("Output Weight", "learned param"),
+    "MHAOut": ("MHA Output", "Concat @ Wo"),
+}
+
+_MULTI_HEAD_COLOR = {
+    "input": "#7d3c98",
+    "param": "#b7770d",
+    "activation": "#c0392b",
+    "attn": "#117a65",
+    "concat": "#566573",
+    "output": "#a04000",
+}
+
+MULTI_HEAD_EDGES = [
+    ("X", "Wq1", "X->Wq1", ""),
+    ("Wq1", "Q1", "Wq1->Q1", "X · Wq1"),
+    ("X", "Wk1", "X->Wk1", ""),
+    ("Wk1", "K1", "Wk1->K1", "X · Wk1"),
+    ("X", "Wv1", "X->Wv1", ""),
+    ("Wv1", "V1", "Wv1->V1", "X · Wv1"),
+    ("X", "Wq2", "X->Wq2", ""),
+    ("Wq2", "Q2", "Wq2->Q2", "X · Wq2"),
+    ("X", "Wk2", "X->Wk2", ""),
+    ("Wk2", "K2", "Wk2->K2", "X · Wk2"),
+    ("X", "Wv2", "X->Wv2", ""),
+    ("Wv2", "V2", "Wv2->V2", "X · Wv2"),
+    ("Q1", "A1", "Q1->A1", "Q1 · K1ᵀ"),
+    ("K1", "A1", "K1->A1", ""),
+    ("Q2", "A2", "Q2->A2", "Q2 · K2ᵀ"),
+    ("K2", "A2", "K2->A2", ""),
+    ("A1", "C1", "A1->C1", "A1 · V1"),
+    ("V1", "C1", "V1->C1", ""),
+    ("A2", "C2", "A2->C2", "A2 · V2"),
+    ("V2", "C2", "V2->C2", ""),
+    ("C1", "Concat", "C1->Concat", "join columns"),
+    ("C2", "Concat", "C2->Concat", ""),
+    ("Concat", "Wo", "Concat->Wo", ""),
+    ("Wo", "MHAOut", "Wo->MHAOut", "Concat · Wo"),
+]
+
+
+def _mh_bounds(name):
+    n = MULTI_HEAD_LAYOUT[name]
+    hw, hh = n["w"] / 2, n["h"] / 2
+    return n["cx"] - hw, n["cy"] - hh, n["cx"] + hw, n["cy"] + hh
+
+
+def _mh_port(name, side, y_frac=0.5):
+    x0, y0, x1, y1 = _mh_bounds(name)
+    py = y0 + y_frac * (y1 - y0)
+    return (x1, py) if side == "right" else (x0, py)
+
+
+def _mh_shape_label(name, mat):
+    rows, cols = mat.shape
+    return f"{rows}×{cols}"
+
+
+def multi_head_diagram(matrices, active_nodes, active_edges, tokens,
+                       fig_width=1500, fig_height=860):
+    active_node_set = set(active_nodes)
+    active_edge_set = set(active_edges)
+    shapes = []
+    annotations = []
+    traces = []
+
+    for name, layout in MULTI_HEAD_LAYOUT.items():
+        is_active = name in active_node_set
+        color = _MULTI_HEAD_COLOR[layout["nt"]]
+        has_params = layout.get("param", False)
+        x0, y0, x1, y1 = _mh_bounds(name)
+
+        shapes.append(dict(
+            type="rect", xref="paper", yref="paper",
+            x0=x0, y0=y0, x1=x1, y1=y1,
+            fillcolor=_rgba(color, 0.12 if is_active else 0.035),
+            line=dict(
+                color=_rgba(color, 1.0 if is_active else 0.18),
+                width=2.3 if is_active else 1.0,
+                dash="dash" if has_params else "solid",
+            ),
+            layer="below",
+        ))
+
+        role, formula = MULTI_HEAD_ROLES[name]
+        compact_node = layout["nt"] in ("param", "activation")
+        title_size = 13 if compact_node else 17
+        role_size = 9 if compact_node else 11
+        role_line = "" if compact_node else (
+            f"<br><span style='font-size:{role_size}px;color:{'#333' if is_active else '#ccc'}'>{role}</span>"
+        )
+        annotations.append(dict(
+            xref="paper", yref="paper", x=layout["cx"], y=y1 + 0.016,
+            yanchor="bottom", showarrow=False, align="center",
+            text=(f"<span style='font-size:{title_size}px;font-weight:800;color:{color if is_active else _rgba(color, 0.30)}'>{name}</span>"
+                  f"{role_line}"),
+        ))
+
+        mat = matrices.get(name)
+        if mat is not None:
+            formula_text = "" if layout["nt"] in ("param", "activation") else (
+                f"<br><span style='font-size:8px;color:{'#666' if is_active else '#ddd'}'>{formula}</span>"
+            )
+            annotations.append(dict(
+                xref="paper", yref="paper", x=layout["cx"], y=y0 - 0.018,
+                yanchor="top", showarrow=False, align="center",
+                text=(f"<span style='font-size:9px;color:{'#333' if is_active else '#bbb'}'>[{_mh_shape_label(name, mat)}]</span>"
+                      f"{formula_text}"),
+            ))
+
+    for src, dst, edge_key, label in MULTI_HEAD_EDGES:
+        is_active = edge_key in active_edge_set
+        alpha = 0.86 if is_active else 0.10
+        width = 2.0 if is_active else 0.7
+        sx, sy = _mh_port(src, "right")
+        dx, dy = _mh_port(dst, "left")
+        route = "short" if src.startswith("W") or dst.startswith("W") or src in ("Concat", "Wo") else "scurve"
+        path = _bezier_path(sx, sy, dx, dy, route)
+        shapes.append(dict(
+            type="path", xref="paper", yref="paper", path=path,
+            fillcolor="rgba(0,0,0,0)",
+            line=dict(color=_rgba("#1c2833", alpha), width=width),
+            layer="above",
+        ))
+        annotations.append(dict(
+            xref="paper", yref="paper", x=dx, y=dy,
+            ax=-16, ay=0, axref="pixel", ayref="pixel",
+            showarrow=True, arrowhead=3, arrowsize=0.85, arrowwidth=width,
+            arrowcolor=_rgba("#1c2833", alpha), text="",
+        ))
+        if label and is_active:
+            label_y = max(sy, dy) + 0.024
+            if src.startswith("W"):
+                label_y = sy + 0.018
+            elif edge_key in ("Q1->A1", "Q2->A2"):
+                label_y = max(sy, dy) + 0.055
+            elif edge_key in ("A1->C1", "A2->C2"):
+                label_y = sy + 0.035
+            annotations.append(dict(
+                xref="paper", yref="paper", x=(sx + dx) / 2, y=label_y,
+                text=f"<b>{label}</b>", showarrow=False,
+                bgcolor="rgba(255,255,255,0.90)", borderpad=2,
+                font=dict(size=8 if src.startswith("W") else 9, color="#1c2833"),
+            ))
+
+    annotations.extend([
+        dict(xref="paper", yref="paper", x=0.385, y=0.990,
+             text="<b>Head 1</b>", showarrow=False, font=dict(size=16, color="#b03a2e")),
+        dict(xref="paper", yref="paper", x=0.385, y=0.010,
+             text="<b>Head 2</b>", showarrow=False, font=dict(size=16, color="#2874a6")),
+    ])
+
+    node_list = list(MULTI_HEAD_LAYOUT.keys())
+    for name, layout in MULTI_HEAD_LAYOUT.items():
+        mat = matrices.get(name)
+        if mat is None:
+            continue
+        is_active = name in active_node_set
+        display = mat.copy().astype(float)
+        rows, cols = display.shape
+        use_div = name.startswith("A")
+        is_param_node = layout["nt"] == "param"
+        hover = [[f"<b>{name}[{r},{c}]</b><br>{display[r, c]:.4f}"
+                  for c in range(cols)] for r in range(rows)]
+
+        idx = node_list.index(name)
+        xax = "x" if idx == 0 else f"x{idx+1}"
+        yax = "y" if idx == 0 else f"y{idx+1}"
+        xak = "xaxis" if idx == 0 else f"xaxis{idx+1}"
+        yak = "yaxis" if idx == 0 else f"yaxis{idx+1}"
+        x0, y0, x1, y1 = _mh_bounds(name)
+        row_labels = [tokens[r] if r < len(tokens) else str(r) for r in range(rows)]
+
+        trace = go.Heatmap(
+            z=display,
+            colorscale="Blues" if use_div else ("YlOrBr" if is_param_node else "Viridis"),
+            showscale=False,
+            opacity=0.92 if is_active else 0.18,
+            hoverinfo="text",
+            hovertemplate="%{text}<extra></extra>",
+            text=hover,
+            y=row_labels if name == "X" else None,
+            xaxis=xax,
+            yaxis=yax,
+        )
+        traces.append((trace, xak, yak, x0, y0, x1, y1, name))
+
+    layout_args = dict(
+        paper_bgcolor="white", plot_bgcolor="white",
+        width=fig_width, height=fig_height,
+        margin=dict(l=8, r=8, t=58, b=48),
+        showlegend=False,
+        shapes=shapes,
+        annotations=annotations,
+    )
+
+    for _, xak, yak, x0, y0, x1, y1, name in traces:
+        layout_args[xak] = dict(
+            domain=[x0, x1], showticklabels=False,
+            showgrid=False, zeroline=False, fixedrange=True,
+        )
+        layout_args[yak] = dict(
+            domain=[y0, y1], showticklabels=(name == "X"),
+            tickfont=dict(size=8, color="#444"),
+            side="right",
+            showgrid=False, zeroline=False, fixedrange=True,
+            autorange="reversed",
+        )
+
+    return go.Figure(data=[t[0] for t in traces], layout=go.Layout(**layout_args))
+
+
+def multi_head_detail_panel(node_name, matrices, tokens):
+    mat = matrices.get(node_name)
+    if mat is None:
+        role, formula = MULTI_HEAD_ROLES.get(node_name, ("", ""))
+        fig = go.Figure()
+        fig.update_layout(
+            title=dict(text=f"<b>{node_name}</b>  <span style='color:#888'>{role}</span>",
+                       font=dict(size=12)),
+            height=270,
+            margin=dict(l=20, r=20, t=48, b=20),
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            annotations=[dict(
+                x=0.5, y=0.52, xref="paper", yref="paper",
+                text=formula, showarrow=False, font=dict(size=15, color="#333"),
+            )],
+        )
+        return fig
+
+    display = mat.copy().astype(float)
+    rows, cols = display.shape
+    role, formula = MULTI_HEAD_ROLES.get(node_name, ("", ""))
+    title_text = f"<b>{node_name}</b>  <span style='color:#888'>{role}  [{rows}×{cols}]</span>"
+    if formula:
+        title_text += f"   <span style='color:#aaa'>{formula}</span>"
+
+    row_labels = [tokens[r] if r < len(tokens) else str(r) for r in range(rows)]
+    col_labels = [f"d{c}" for c in range(cols)]
+    hover = [[f"{display[r, c]:.4f}" for c in range(cols)] for r in range(rows)]
+
+    fig = go.Figure(go.Heatmap(
+        z=display,
+        colorscale="Blues" if node_name.startswith("A") else "Viridis",
+        showscale=True,
+        hovertemplate="%{text}<extra></extra>",
+        text=hover,
+        x=col_labels,
+        y=row_labels,
+    ))
+    fig.update_layout(
+        title=dict(text=title_text, font=dict(size=12)),
+        height=270,
+        margin=dict(l=50, r=10, t=48, b=30),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# KV cache flow
+# ---------------------------------------------------------------------------
+
+KV_CACHE_LAYOUT = {
+    "XFull":      dict(cx=0.045, cy=0.55, w=0.060, h=0.170, nt="input"),
+    "XNew":       dict(cx=0.160, cy=0.55, w=0.060, h=0.060, nt="new"),
+    "q_new":      dict(cx=0.300, cy=0.78, w=0.060, h=0.060, nt="activation"),
+    "k_new":      dict(cx=0.300, cy=0.55, w=0.060, h=0.060, nt="activation"),
+    "v_new":      dict(cx=0.300, cy=0.32, w=0.060, h=0.060, nt="activation"),
+    "K_cache":    dict(cx=0.470, cy=0.68, w=0.070, h=0.135, nt="cache"),
+    "V_cache":    dict(cx=0.470, cy=0.40, w=0.070, h=0.135, nt="cache"),
+    "K_full":     dict(cx=0.640, cy=0.68, w=0.075, h=0.170, nt="kv"),
+    "V_full":     dict(cx=0.640, cy=0.40, w=0.075, h=0.170, nt="kv"),
+    "ScoresNew":  dict(cx=0.780, cy=0.78, w=0.085, h=0.060, nt="score"),
+    "AttnNew":    dict(cx=0.885, cy=0.78, w=0.085, h=0.060, nt="attn"),
+    "ContextNew": dict(cx=0.885, cy=0.40, w=0.075, h=0.060, nt="output"),
+}
+
+KV_CACHE_ROLES = {
+    "XFull":      ("Input X", "old rows + new row"),
+    "XNew":       ("New Token Row", "last row of X"),
+    "q_new":      ("New Query", "fresh compute"),
+    "k_new":      ("New Key", "append to cache"),
+    "v_new":      ("New Value", "append to cache"),
+    "K_cache":    ("K Cache", "reused old rows"),
+    "V_cache":    ("V Cache", "reused old rows"),
+    "K_full":     ("Full K", "[K_cache; k_new]"),
+    "V_full":     ("Full V", "[V_cache; v_new]"),
+    "ScoresNew":  ("New Score Row", "q_new @ K_full.T"),
+    "AttnNew":    ("New Attention Row", "softmax"),
+    "ContextNew": ("New Context", "AttnNew @ V_full"),
+}
+
+_KV_CACHE_COLOR = {
+    "input": "#7d3c98",
+    "new": "#d35400",
+    "activation": "#c0392b",
+    "cache": "#2874a6",
+    "kv": "#117a65",
+    "score": "#1a5276",
+    "attn": "#117a65",
+    "output": "#a04000",
+}
+
+KV_CACHE_EDGES = [
+    ("XFull", "XNew", "XFull->XNew", "take new row"),
+    ("XNew", "q_new", "XNew->q_new", "Wq"),
+    ("XNew", "k_new", "XNew->k_new", "Wk"),
+    ("XNew", "v_new", "XNew->v_new", "Wv"),
+    ("K_cache", "K_full", "K_cache->K_full", "cached rows"),
+    ("k_new", "K_full", "k_new->K_full", "append"),
+    ("V_cache", "V_full", "V_cache->V_full", "cached rows"),
+    ("v_new", "V_full", "v_new->V_full", "append"),
+    ("q_new", "ScoresNew", "q_new->ScoresNew", ""),
+    ("K_full", "ScoresNew", "K_full->ScoresNew", "q_new · Kᵀ"),
+    ("ScoresNew", "AttnNew", "ScoresNew->AttnNew", "softmax"),
+    ("AttnNew", "ContextNew", "AttnNew->ContextNew", ""),
+    ("V_full", "ContextNew", "V_full->ContextNew", "A · V"),
+]
+
+
+def _kv_bounds(name):
+    n = KV_CACHE_LAYOUT[name]
+    hw, hh = n["w"] / 2, n["h"] / 2
+    return n["cx"] - hw, n["cy"] - hh, n["cx"] + hw, n["cy"] + hh
+
+
+def _kv_port(name, side, y_frac=0.5):
+    x0, y0, x1, y1 = _kv_bounds(name)
+    py = y0 + y_frac * (y1 - y0)
+    return (x1, py) if side == "right" else (x0, py)
+
+
+def _kv_shape_label(mat):
+    rows, cols = mat.shape
+    return f"{rows}×{cols}"
+
+
+def _row_band(bounds, rows, row_index):
+    x0, y0, x1, y1 = bounds
+    row_h = (y1 - y0) / rows
+    top = y1 - row_index * row_h
+    return top - row_h, top
+
+
+def _add_row_overlay(shapes, name, rows, row_index, color, alpha):
+    x0, y0, x1, y1 = _kv_bounds(name)
+    band_y0, band_y1 = _row_band((x0, y0, x1, y1), rows, row_index)
+    shapes.append(dict(
+        type="rect", xref="paper", yref="paper",
+        x0=x0, y0=band_y0, x1=x1, y1=band_y1,
+        fillcolor=_rgba(color, alpha),
+        line=dict(color=_rgba(color, min(alpha + 0.25, 0.95)), width=1.0),
+        layer="above",
+    ))
+
+
+def kv_cache_diagram(matrices, active_nodes, active_edges, tokens,
+                     fig_width=1500, fig_height=650):
+    active_node_set = set(active_nodes)
+    active_edge_set = set(active_edges)
+    shapes = []
+    annotations = []
+    traces = []
+
+    for name, layout in KV_CACHE_LAYOUT.items():
+        is_active = name in active_node_set
+        color = _KV_CACHE_COLOR[layout["nt"]]
+        x0, y0, x1, y1 = _kv_bounds(name)
+        shapes.append(dict(
+            type="rect", xref="paper", yref="paper",
+            x0=x0, y0=y0, x1=x1, y1=y1,
+            fillcolor=_rgba(color, 0.12 if is_active else 0.035),
+            line=dict(color=_rgba(color, 1.0 if is_active else 0.18),
+                      width=2.4 if is_active else 1.0),
+            layer="below",
+        ))
+
+        role, formula = KV_CACHE_ROLES[name]
+        annotations.append(dict(
+            xref="paper", yref="paper", x=layout["cx"], y=y1 + 0.024,
+            yanchor="bottom", showarrow=False, align="center",
+            text=(f"<span style='font-size:17px;font-weight:800;color:{color if is_active else _rgba(color, 0.30)}'>{name}</span>"
+                  f"<br><span style='font-size:11px;color:{'#333' if is_active else '#ccc'}'>{role}</span>"),
+        ))
+
+        mat = matrices.get(name)
+        if mat is not None:
+            annotations.append(dict(
+                xref="paper", yref="paper", x=layout["cx"], y=y0 - 0.018,
+                yanchor="top", showarrow=False, align="center",
+                text=(f"<span style='font-size:10px;color:{'#333' if is_active else '#bbb'}'>[{_kv_shape_label(mat)}]</span>"
+                      f"<br><span style='font-size:9px;color:{'#666' if is_active else '#ddd'}'>{formula}</span>"),
+            ))
+
+    for src, dst, edge_key, label in KV_CACHE_EDGES:
+        is_active = edge_key in active_edge_set
+        alpha = 0.86 if is_active else 0.10
+        width = 2.0 if is_active else 0.7
+        sx, sy = _kv_port(src, "right")
+        dx, dy = _kv_port(dst, "left")
+        path = _bezier_path(sx, sy, dx, dy, "scurve")
+        shapes.append(dict(
+            type="path", xref="paper", yref="paper", path=path,
+            fillcolor="rgba(0,0,0,0)",
+            line=dict(color=_rgba("#1c2833", alpha), width=width),
+            layer="above",
+        ))
+        annotations.append(dict(
+            xref="paper", yref="paper", x=dx, y=dy,
+            ax=-16, ay=0, axref="pixel", ayref="pixel",
+            showarrow=True, arrowhead=3, arrowsize=0.85, arrowwidth=width,
+            arrowcolor=_rgba("#1c2833", alpha), text="",
+        ))
+        if label and is_active:
+            annotations.append(dict(
+                xref="paper", yref="paper", x=(sx + dx) / 2, y=max(sy, dy) + 0.035,
+                text=f"<b>{label}</b>", showarrow=False,
+                bgcolor="rgba(255,255,255,0.90)", borderpad=2,
+                font=dict(size=9, color="#1c2833"),
+            ))
+
+    node_list = list(KV_CACHE_LAYOUT.keys())
+    for name, layout in KV_CACHE_LAYOUT.items():
+        mat = matrices.get(name)
+        if mat is None:
+            continue
+        is_active = name in active_node_set
+        display = mat.copy().astype(float)
+        rows, cols = display.shape
+        hover = [[f"<b>{name}[{r},{c}]</b><br>{display[r, c]:.4f}"
+                  for c in range(cols)] for r in range(rows)]
+        idx = node_list.index(name)
+        xax = "x" if idx == 0 else f"x{idx+1}"
+        yax = "y" if idx == 0 else f"y{idx+1}"
+        xak = "xaxis" if idx == 0 else f"xaxis{idx+1}"
+        yak = "yaxis" if idx == 0 else f"yaxis{idx+1}"
+        x0, y0, x1, y1 = _kv_bounds(name)
+        row_labels = [tokens[r] if r < len(tokens) else str(r) for r in range(rows)]
+        if rows == 1:
+            row_labels = ["new"]
+        trace = go.Heatmap(
+            z=display,
+            colorscale="Blues" if layout["nt"] == "cache" else ("Oranges" if layout["nt"] == "new" else "Viridis"),
+            showscale=False,
+            opacity=0.92 if is_active else 0.18,
+            hoverinfo="text",
+            hovertemplate="%{text}<extra></extra>",
+            text=hover,
+            y=row_labels if name in ("XFull", "K_full", "V_full") else None,
+            xaxis=xax,
+            yaxis=yax,
+        )
+        traces.append((trace, xak, yak, x0, y0, x1, y1, name))
+
+    n = matrices["XFull"].shape[0]
+    prev_n = max(n - 1, 1)
+    _add_row_overlay(shapes, "XFull", n, n - 1, "#d35400", 0.28)
+    _add_row_overlay(shapes, "K_full", n, n - 1, "#d35400", 0.28)
+    _add_row_overlay(shapes, "V_full", n, n - 1, "#d35400", 0.28)
+    for row in range(n - 1):
+        _add_row_overlay(shapes, "K_full", n, row, "#2874a6", 0.10)
+        _add_row_overlay(shapes, "V_full", n, row, "#2874a6", 0.10)
+    for row in range(prev_n):
+        _add_row_overlay(shapes, "K_cache", prev_n, row, "#2874a6", 0.12)
+        _add_row_overlay(shapes, "V_cache", prev_n, row, "#2874a6", 0.12)
+
+    annotations.extend([
+        dict(xref="paper", yref="paper", x=0.055, y=0.255,
+             text="<span style='color:#d35400'><b>orange</b></span> = newly added token row",
+             showarrow=False, font=dict(size=11, color="#333")),
+        dict(xref="paper", yref="paper", x=0.245, y=0.255,
+             text="<span style='color:#2874a6'><b>blue</b></span> = reused from KV cache",
+             showarrow=False, font=dict(size=11, color="#333")),
+    ])
+
+    layout_args = dict(
+        paper_bgcolor="white", plot_bgcolor="white",
+        width=fig_width, height=fig_height,
+        margin=dict(l=8, r=8, t=70, b=58),
+        showlegend=False,
+        shapes=shapes,
+        annotations=annotations,
+    )
+    for _, xak, yak, x0, y0, x1, y1, name in traces:
+        layout_args[xak] = dict(
+            domain=[x0, x1], showticklabels=False,
+            showgrid=False, zeroline=False, fixedrange=True,
+        )
+        layout_args[yak] = dict(
+            domain=[y0, y1], showticklabels=name in ("XFull", "K_full", "V_full"),
+            tickfont=dict(size=8, color="#444"),
+            side="right",
+            showgrid=False, zeroline=False, fixedrange=True,
+            autorange="reversed",
+        )
+
+    return go.Figure(data=[t[0] for t in traces], layout=go.Layout(**layout_args))
+
+
+def kv_cache_detail_panel(node_name, matrices, tokens):
+    mat = matrices.get(node_name)
+    if mat is None:
+        return go.Figure()
+    display = mat.copy().astype(float)
+    rows, cols = display.shape
+    role, formula = KV_CACHE_ROLES.get(node_name, ("", ""))
+    title_text = f"<b>{node_name}</b>  <span style='color:#888'>{role}  [{rows}×{cols}]</span>"
+    if formula:
+        title_text += f"   <span style='color:#aaa'>{formula}</span>"
+    row_labels = [tokens[r] if r < len(tokens) else str(r) for r in range(rows)]
+    if rows == 1:
+        row_labels = ["new"]
+    col_labels = [f"d{c}" for c in range(cols)]
+    hover = [[f"{display[r, c]:.4f}" for c in range(cols)] for r in range(rows)]
+    fig = go.Figure(go.Heatmap(
+        z=display,
+        colorscale="Viridis",
+        showscale=True,
+        hovertemplate="%{text}<extra></extra>",
+        text=hover,
+        x=col_labels,
+        y=row_labels,
+    ))
+    fig.update_layout(
+        title=dict(text=title_text, font=dict(size=12)),
+        height=270,
+        margin=dict(l=50, r=10, t=48, b=30),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig
+
+
+# Override the earlier cache-specific renderer with the same matrix layout as
+# the main attention flow, plus row overlays for cached vs newly added values.
+KV_CACHE_LAYOUT = NODE_LAYOUT
+
+
+def _add_attention_row_overlay(shapes, node_name, rows, row_index, color, alpha):
+    x0, y0, x1, y1 = _node_bounds(node_name)
+    band_y0, band_y1 = _row_band((x0, y0, x1, y1), rows, row_index)
+    shapes.append(dict(
+        type="rect", xref="paper", yref="paper",
+        x0=x0, y0=band_y0, x1=x1, y1=band_y1,
+        fillcolor=_rgba(color, alpha),
+        line=dict(color=_rgba(color, 0.95), width=2.2),
+        layer="above",
+    ))
+
+
+def kv_cache_diagram(matrices, active_nodes, active_edges,
+                     seq_len, d_model, d_head, tokens,
+                     fig_width=1400, fig_height=700):
+    fig = flow_diagram(
+        matrices=matrices,
+        active_nodes=active_nodes,
+        active_edges=active_edges,
+        seq_len=seq_len,
+        d_model=d_model,
+        d_head=d_head,
+        tokens=tokens,
+        fig_width=fig_width,
+        fig_height=fig_height,
+    )
+
+    shapes = list(fig.layout.shapes)
+    annotations = list(fig.layout.annotations)
+    cached_color = "#2874a6"
+    new_color = "#d35400"
+    new_row = seq_len - 1
+
+    # New token-derived rows.
+    for node_name in ("X", "Q", "K", "V", "C"):
+        _add_attention_row_overlay(shapes, node_name, seq_len, new_row, new_color, 0.30)
+    for node_name in ("S", "S_scaled", "S_masked", "A"):
+        _add_attention_row_overlay(shapes, node_name, seq_len, new_row, new_color, 0.42)
+
+    # The reusable cache is specifically previous K/V rows.
+    for row in range(seq_len - 1):
+        _add_attention_row_overlay(shapes, "K", seq_len, row, cached_color, 0.18)
+        _add_attention_row_overlay(shapes, "V", seq_len, row, cached_color, 0.18)
+
+    annotations.extend([
+        dict(
+            xref="paper", yref="paper", x=0.185, y=0.060,
+            text="<span style='color:#d35400'><b>orange</b></span> = values added for the newest token",
+            showarrow=False,
+            bgcolor="rgba(255,255,255,0.92)",
+            borderpad=3,
+            font=dict(size=11, color="#333"),
+        ),
+        dict(
+            xref="paper", yref="paper", x=0.185, y=0.020,
+            text="<span style='color:#2874a6'><b>blue</b></span> = previous K/V rows reused from cache",
+            showarrow=False,
+            bgcolor="rgba(255,255,255,0.92)",
+            borderpad=3,
+            font=dict(size=11, color="#333"),
+        ),
+    ])
+
+    fig.update_layout(shapes=shapes, annotations=annotations)
+    return fig

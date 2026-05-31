@@ -1,5 +1,11 @@
 import streamlit as st
-from attention_math import make_matrices, compute_attention
+from attention_math import (
+    make_matrices,
+    compute_attention,
+    compute_post_context,
+    compute_multi_head,
+    compute_kv_cache_demo,
+)
 from steps import num_steps
 
 
@@ -9,6 +15,14 @@ def _recompute():
     Q, K, V, S, S_scaled, S_masked, A, C = compute_attention(X, Wq, Wk, Wv)
     ss.matrices = dict(X=X, Wq=Wq, Wk=Wk, Wv=Wv, Q=Q, K=K, V=V,
                        S=S, S_scaled=S_scaled, S_masked=S_masked, A=A, C=C)
+    ss.multi_head_matrices = compute_multi_head(X, seed=ss.seed, d_head=ss.d_head)
+    ss.kv_cache_matrices = compute_kv_cache_demo(X, Wq, Wk, Wv)
+    ss.post_matrices = compute_post_context(
+        C,
+        seed=ss.seed,
+        vocab_size=ss.post_vocab_size,
+        ffn_hidden_mult=ss.ffn_hidden_mult,
+    )
 
 
 def init_state():
@@ -17,10 +31,24 @@ def init_state():
         ss.seq_len = 4
         ss.d_model = 8
         ss.d_head = 4
+        ss.ffn_hidden_mult = 2
+        ss.post_vocab_size = 12
         ss.seed = 42
         ss.step_idx = 0
+        ss.flow_mode = "attention"
         ss.tokens = ["The", "cat", "sat", "mat"]
         ss.initialized = True
+        _recompute()
+    post_defaults_changed = False
+    if "ffn_hidden_mult" not in ss:
+        ss.ffn_hidden_mult = 2
+        post_defaults_changed = True
+    if "post_vocab_size" not in ss:
+        ss.post_vocab_size = 12
+        post_defaults_changed = True
+    if "flow_mode" not in ss:
+        ss.flow_mode = "attention"
+    if post_defaults_changed or "multi_head_matrices" not in ss or "kv_cache_matrices" not in ss:
         _recompute()
 
 
@@ -41,9 +69,13 @@ def apply_dim_change():
     _recompute()
 
 
+def apply_post_change():
+    _recompute()
+
+
 def go_next():
     ss = st.session_state
-    ss.step_idx = min(ss.step_idx + 1, num_steps() - 1)
+    ss.step_idx = min(ss.step_idx + 1, num_steps(ss.flow_mode) - 1)
 
 
 def go_prev():
