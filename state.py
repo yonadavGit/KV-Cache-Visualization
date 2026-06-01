@@ -5,6 +5,9 @@ from attention_math import (
     compute_post_context,
     compute_multi_head,
     compute_kv_cache_demo,
+    compute_multi_query_attention,
+    compute_grouped_query_attention,
+    compute_mla_attention,
 )
 from steps import num_steps
 
@@ -16,6 +19,9 @@ def _recompute():
     ss.matrices = dict(X=X, Wq=Wq, Wk=Wk, Wv=Wv, Q=Q, K=K, V=V,
                        S=S, S_scaled=S_scaled, S_masked=S_masked, A=A, C=C)
     ss.multi_head_matrices = compute_multi_head(X, seed=ss.seed, d_head=ss.d_head)
+    ss.mqa_matrices = compute_multi_query_attention(X, seed=ss.seed, d_head=ss.d_head)
+    ss.gqa_matrices = compute_grouped_query_attention(X, seed=ss.seed, d_head=ss.d_head)
+    ss.mla_matrices = compute_mla_attention(X, seed=ss.seed, d_head=ss.d_head)
     ss.kv_cache_matrices = compute_kv_cache_demo(X, Wq, Wk, Wv)
     ss.post_matrices = compute_post_context(
         C,
@@ -35,7 +41,9 @@ def init_state():
         ss.post_vocab_size = 12
         ss.seed = 42
         ss.step_idx = 0
-        ss.flow_mode = "attention"
+        ss.flow_mode = "intro"
+        ss.mla_show_absorption = False
+        ss.decode_row_view = False
         ss.tokens = ["The", "cat", "sat", "mat"]
         ss.initialized = True
         _recompute()
@@ -47,8 +55,14 @@ def init_state():
         ss.post_vocab_size = 12
         post_defaults_changed = True
     if "flow_mode" not in ss:
-        ss.flow_mode = "attention"
-    if post_defaults_changed or "multi_head_matrices" not in ss or "kv_cache_matrices" not in ss:
+        ss.flow_mode = "intro"
+    if "mla_show_absorption" not in ss:
+        ss.mla_show_absorption = False
+    if "decode_row_view" not in ss:
+        ss.decode_row_view = False
+    if (post_defaults_changed or "multi_head_matrices" not in ss
+            or "mqa_matrices" not in ss or "gqa_matrices" not in ss
+            or "mla_matrices" not in ss or "kv_cache_matrices" not in ss):
         _recompute()
 
 

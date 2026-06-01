@@ -150,3 +150,169 @@ def compute_kv_cache_demo(X, Wq, Wk, Wv):
         AttnNew=AttnNew,
         ContextNew=ContextNew,
     )
+
+
+def compute_multi_query_attention(X, seed=42, num_heads=2, d_head=None):
+    rng = np.random.default_rng(seed + 3000)
+    seq_len, d_model = X.shape
+    d_head = d_head or max(1, d_model // (num_heads * 2))
+    combined_dim = num_heads * d_head
+
+    Wk = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+    Wv = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+    K = X @ Wk
+    V = X @ Wv
+
+    outputs = {"X": X, "Wk": Wk, "Wv": Wv, "K": K, "V": V}
+    contexts = []
+    mask = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)
+
+    for i in range(num_heads):
+        suffix = str(i + 1)
+        Wq = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+        Q = X @ Wq
+        S = (Q @ K.T) / np.sqrt(d_head)
+        S[mask] = -np.inf
+        S_shifted = S - np.nanmax(
+            np.where(np.isfinite(S), S, -np.inf), axis=1, keepdims=True
+        )
+        exp_s = np.exp(S_shifted)
+        exp_s[mask] = 0.0
+        A = exp_s / exp_s.sum(axis=1, keepdims=True)
+        C = A @ V
+
+        outputs[f"Wq{suffix}"] = Wq
+        outputs[f"Q{suffix}"] = Q
+        outputs[f"A{suffix}"] = A
+        outputs[f"C{suffix}"] = C
+        contexts.append(C)
+
+    Concat = np.concatenate(contexts, axis=1)
+    Wo = rng.standard_normal((combined_dim, d_model)).astype(np.float32) * 0.35
+    MQAOut = Concat @ Wo
+    outputs["Concat"] = Concat
+    outputs["Wo"] = Wo
+    outputs["MQAOut"] = MQAOut
+    return outputs
+
+
+def compute_grouped_query_attention(X, seed=42, num_heads=4, num_groups=2, d_head=None):
+    rng = np.random.default_rng(seed + 4000)
+    seq_len, d_model = X.shape
+    d_head = d_head or max(1, d_model // num_heads)
+    heads_per_group = num_heads // num_groups
+    combined_dim = num_heads * d_head
+
+    outputs = {"X": X}
+    group_kv = {}
+    for group_idx in range(num_groups):
+        suffix = str(group_idx + 1)
+        Wk = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+        Wv = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+        K = X @ Wk
+        V = X @ Wv
+        outputs[f"WkG{suffix}"] = Wk
+        outputs[f"WvG{suffix}"] = Wv
+        outputs[f"KG{suffix}"] = K
+        outputs[f"VG{suffix}"] = V
+        group_kv[group_idx] = (K, V)
+
+    contexts = []
+    mask = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)
+    for head_idx in range(num_heads):
+        suffix = str(head_idx + 1)
+        group_idx = head_idx // heads_per_group
+        group_suffix = str(group_idx + 1)
+        K, V = group_kv[group_idx]
+
+        Wq = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+        Q = X @ Wq
+        S = (Q @ K.T) / np.sqrt(d_head)
+        S[mask] = -np.inf
+        S_shifted = S - np.nanmax(
+            np.where(np.isfinite(S), S, -np.inf), axis=1, keepdims=True
+        )
+        exp_s = np.exp(S_shifted)
+        exp_s[mask] = 0.0
+        A = exp_s / exp_s.sum(axis=1, keepdims=True)
+        C = A @ V
+
+        outputs[f"Wq{suffix}"] = Wq
+        outputs[f"Q{suffix}"] = Q
+        outputs[f"A{suffix}"] = A
+        outputs[f"C{suffix}"] = C
+        outputs[f"head{suffix}_group"] = group_suffix
+        contexts.append(C)
+
+    Concat = np.concatenate(contexts, axis=1)
+    Wo = rng.standard_normal((combined_dim, d_model)).astype(np.float32) * 0.35
+    GQAOut = Concat @ Wo
+    outputs["Concat"] = Concat
+    outputs["Wo"] = Wo
+    outputs["GQAOut"] = GQAOut
+    return outputs
+
+
+def compute_mla_attention(X, seed=42, d_head=None, d_latent=None):
+    rng = np.random.default_rng(seed + 5000)
+    seq_len, d_model = X.shape
+    d_head = d_head or max(1, d_model // 2)
+    d_latent = d_latent or max(2, d_head // 2)
+
+    Wq = rng.standard_normal((d_model, d_head)).astype(np.float32) * 0.3
+    Wdkv = rng.standard_normal((d_model, d_latent)).astype(np.float32) * 0.3
+    Wuk = rng.standard_normal((d_latent, d_head)).astype(np.float32) * 0.3
+    Wuv = rng.standard_normal((d_latent, d_head)).astype(np.float32) * 0.3
+    Wo = rng.standard_normal((d_head, d_model)).astype(np.float32) * 0.35
+
+    Q = X @ Wq
+    cKV = X @ Wdkv
+    K = cKV @ Wuk
+    V = cKV @ Wuv
+
+    S = Q @ K.T
+    S_scaled = S / np.sqrt(d_head)
+    mask = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)
+    S_masked = S_scaled.copy()
+    S_masked[mask] = -np.inf
+    S_shifted = S_masked - np.nanmax(
+        np.where(np.isfinite(S_masked), S_masked, -np.inf), axis=1, keepdims=True
+    )
+    exp_s = np.exp(S_shifted)
+    exp_s[mask] = 0.0
+    A = exp_s / exp_s.sum(axis=1, keepdims=True)
+    C = A @ V
+    MLAOut = C @ Wo
+
+    Wscore = Wq @ Wuk.T
+    Wout = Wuv @ Wo
+    XNew = X[-1:, :]
+    S_abs = XNew @ Wscore @ cKV.T
+    S_abs_scaled = S_abs / np.sqrt(d_head)
+    A_abs = _softmax(S_abs_scaled)
+    MLAOut_abs = A_abs @ cKV @ Wout
+
+    return dict(
+        X=X,
+        XNew=XNew,
+        Wq=Wq,
+        Q=Q,
+        Wdkv=Wdkv,
+        cKV=cKV,
+        Wuk=Wuk,
+        Wuv=Wuv,
+        Wo=Wo,
+        Wscore=Wscore,
+        Wout=Wout,
+        K=K,
+        V=V,
+        S=S,
+        S_scaled=S_scaled,
+        S_masked=S_masked,
+        A=A,
+        C=C,
+        MLAOut=MLAOut,
+        S_abs=S_abs,
+        A_abs=A_abs,
+        MLAOut_abs=MLAOut_abs,
+    )

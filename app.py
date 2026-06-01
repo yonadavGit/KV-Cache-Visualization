@@ -7,9 +7,20 @@ from visualization import (
     detail_panel,
     kv_cache_diagram,
     kv_cache_detail_panel,
+    mqa_diagram,
+    mqa_kv_cache_diagram,
+    mqa_detail_panel,
     multi_head_diagram,
+    multi_head_kv_cache_diagram,
     multi_head_detail_panel,
+    gqa_kv_cache_diagram,
+    gqa_detail_panel,
+    GQA_LAYOUT,
+    mla_kv_cache_diagram,
+    mla_detail_panel,
+    MLA_LAYOUT,
     KV_CACHE_LAYOUT,
+    MQA_LAYOUT,
     post_context_diagram,
     post_context_detail_panel,
     MULTI_HEAD_LAYOUT,
@@ -26,24 +37,59 @@ st.set_page_config(
 init_state()
 ss = st.session_state
 
+FLOW_TITLES = {
+    "intro": "KV Caching — Key-Value Caching Intuition",
+    "attention": "Attention — single-head self-attention",
+    "multi_head": "MHA — Multi-Head Attention",
+    "mha_kv_cache": "MHA KV Cache — Multi-Head Attention Key-Value Cache",
+    "mqa": "MQA — Multi-Query Attention",
+    "kv_cache": "KV Cache — Key-Value Cache",
+    "mqa_kv_cache": "MQA KV Cache — Multi-Query Attention Key-Value Cache",
+    "gqa_kv_cache": "GQA KV Cache — Grouped-Query Attention Key-Value Cache",
+    "mla_kv_cache": "MLA KV Cache — Multi-head Latent Attention Key-Value Cache",
+    "post_context": "Post-context — phases after the attention context matrix",
+}
+
+FLOW_SHORT_LABELS = {
+    "intro": "Intro",
+    "attention": "Attention",
+    "multi_head": "Multi-head",
+    "mha_kv_cache": "MHA KV cache",
+    "mqa": "MQA",
+    "kv_cache": "KV cache",
+    "mqa_kv_cache": "MQA KV cache",
+    "gqa_kv_cache": "GQA KV cache",
+    "mla_kv_cache": "MLA KV cache",
+    "post_context": "Post-context",
+}
+
+FLOW_ORDER = [
+    "intro",
+    "attention",
+    "multi_head",
+    "mha_kv_cache",
+    "mqa",
+    "kv_cache",
+    "mqa_kv_cache",
+    "gqa_kv_cache",
+    "mla_kv_cache",
+    "post_context",
+]
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.title("Settings")
 
-    flow_label = st.radio(
+    flow_mode = st.radio(
         "Flow",
-        ["Attention", "Multi-head", "KV cache", "Post-context"],
-        index={"attention": 0, "multi_head": 1, "kv_cache": 2, "post_context": 3}.get(ss.flow_mode, 0),
+        FLOW_ORDER,
+        index=FLOW_ORDER.index(ss.flow_mode) if ss.flow_mode in FLOW_ORDER else 0,
+        format_func=lambda mode: FLOW_SHORT_LABELS[mode],
         key="_flow_mode",
     )
-    new_flow_mode = {
-        "Attention": "attention",
-        "Multi-head": "multi_head",
-        "KV cache": "kv_cache",
-        "Post-context": "post_context",
-    }[flow_label]
+    new_flow_mode = flow_mode
     if new_flow_mode != ss.flow_mode:
         ss.flow_mode = new_flow_mode
         ss.step_idx = 0
@@ -57,8 +103,28 @@ with st.sidebar:
     st.caption(f"Context matrix C: {new_seq} rows × {new_dhead} columns = {new_seq * new_dhead} values")
     if ss.flow_mode == "multi_head":
         st.caption(f"Multi-head demo: 2 heads × {new_dhead} dims → concat width {2 * new_dhead}")
+    if ss.flow_mode == "mha_kv_cache":
+        st.caption(f"MHA KV cache: 2 separate K/V caches, one pair per head")
+    if ss.flow_mode in ("mqa", "mqa_kv_cache"):
+        st.caption(f"MQA demo: 2 query heads share 1 K/V pair; cache width {new_dhead}")
+    if ss.flow_mode == "gqa_kv_cache":
+        st.caption(f"GQA KV cache: 4 query heads, 2 K/V groups; cache width {2 * new_dhead}")
+    if ss.flow_mode == "mla_kv_cache":
+        mla_latent = ss.mla_matrices["cKV"].shape[1] if "mla_matrices" in ss else max(2, new_dhead // 2)
+        st.caption(f"MLA KV cache: stores cKV only; latent cache width {mla_latent}, reconstructed K/V width {new_dhead}")
+        ss.mla_show_absorption = st.toggle(
+            "Show absorption trick",
+            value=ss.get("mla_show_absorption", False),
+            key="_mla_show_absorption",
+        )
     if ss.flow_mode == "kv_cache":
         st.caption(f"KV cache demo: previous cache has {max(new_seq - 1, 1)} rows; new token adds 1 row")
+    if ss.flow_mode in ("kv_cache", "mha_kv_cache", "mqa_kv_cache", "gqa_kv_cache", "mla_kv_cache"):
+        ss.decode_row_view = st.toggle(
+            "Show decode row only",
+            value=ss.get("decode_row_view", False),
+            key="_decode_row_view",
+        )
 
     dim_changed = (new_seq != ss.seq_len or new_dmodel != ss.d_model or new_dhead != ss.d_head)
     if dim_changed:
@@ -135,6 +201,7 @@ if ss.step_idx >= total:
 step  = get_step(ss.step_idx, ss.flow_mode)
 
 st.markdown(
+    f"<p style='font-size:0.95rem;color:#555;margin:0 0 0.15rem 0;font-weight:700'>{FLOW_TITLES[ss.flow_mode]}</p>"
     f"<h1 style='font-size:2.4rem;font-weight:800;margin-bottom:0.1rem'>{step['title']}</h1>"
     f"<p style='font-size:1.05rem;color:#666;margin-top:0;margin-bottom:0.8rem'>{step['subtitle']}</p>",
     unsafe_allow_html=True,
@@ -167,10 +234,54 @@ st.divider()
 # ---------------------------------------------------------------------------
 # Two-column layout: flow diagram | matrix inspector
 # ---------------------------------------------------------------------------
+if ss.flow_mode == "intro":
+    st.image("kv_cat.png", width="stretch")
+    st.stop()
+
 left_col, right_col = st.columns([5, 1])
 
 with left_col:
-    if ss.flow_mode == "kv_cache":
+    if ss.flow_mode == "mqa_kv_cache":
+        fig = mqa_kv_cache_diagram(
+            matrices=ss.mqa_matrices,
+            active_nodes=step["active_nodes"],
+            active_edges=step["active_edges"],
+            tokens=ss.tokens,
+            decode_row_view=ss.get("decode_row_view", False),
+        )
+    elif ss.flow_mode == "mqa":
+        fig = mqa_diagram(
+            matrices=ss.mqa_matrices,
+            active_nodes=step["active_nodes"],
+            active_edges=step["active_edges"],
+            tokens=ss.tokens,
+        )
+    elif ss.flow_mode == "mha_kv_cache":
+        fig = multi_head_kv_cache_diagram(
+            matrices=ss.multi_head_matrices,
+            active_nodes=step["active_nodes"],
+            active_edges=step["active_edges"],
+            tokens=ss.tokens,
+            decode_row_view=ss.get("decode_row_view", False),
+        )
+    elif ss.flow_mode == "gqa_kv_cache":
+        fig = gqa_kv_cache_diagram(
+            matrices=ss.gqa_matrices,
+            active_nodes=step["active_nodes"],
+            active_edges=step["active_edges"],
+            tokens=ss.tokens,
+            decode_row_view=ss.get("decode_row_view", False),
+        )
+    elif ss.flow_mode == "mla_kv_cache":
+        fig = mla_kv_cache_diagram(
+            matrices=ss.mla_matrices,
+            active_nodes=step["active_nodes"],
+            active_edges=step["active_edges"],
+            tokens=ss.tokens,
+            show_absorption=ss.get("mla_show_absorption", False),
+            decode_row_view=ss.get("decode_row_view", False),
+        )
+    elif ss.flow_mode == "kv_cache":
         fig = kv_cache_diagram(
             matrices=ss.matrices,
             active_nodes=step["active_nodes"],
@@ -179,6 +290,7 @@ with left_col:
             d_model=ss.d_model,
             d_head=ss.d_head,
             tokens=ss.tokens,
+            decode_row_view=ss.get("decode_row_view", False),
         )
     elif ss.flow_mode == "multi_head":
         fig = multi_head_diagram(
@@ -208,8 +320,14 @@ with left_col:
 
 with right_col:
     st.markdown("#### Inspect matrix")
-    if ss.flow_mode == "multi_head":
+    if ss.flow_mode in ("multi_head", "mha_kv_cache"):
         node_options = list(MULTI_HEAD_LAYOUT.keys())
+    elif ss.flow_mode == "gqa_kv_cache":
+        node_options = list(GQA_LAYOUT.keys())
+    elif ss.flow_mode == "mla_kv_cache":
+        node_options = list(MLA_LAYOUT.keys())
+    elif ss.flow_mode in ("mqa", "mqa_kv_cache"):
+        node_options = list(MQA_LAYOUT.keys())
     elif ss.flow_mode == "kv_cache":
         node_options = list(KV_CACHE_LAYOUT.keys())
     elif ss.flow_mode == "post_context":
@@ -224,7 +342,35 @@ with right_col:
             break
 
     selected = st.selectbox("Select node", node_options, index=default_idx)
-    if ss.flow_mode == "kv_cache":
+    if ss.flow_mode == "gqa_kv_cache":
+        det_fig = gqa_detail_panel(
+            node_name=selected,
+            matrices=ss.gqa_matrices,
+            tokens=ss.tokens,
+        )
+        current_matrices = ss.gqa_matrices
+    elif ss.flow_mode == "mla_kv_cache":
+        det_fig = mla_detail_panel(
+            node_name=selected,
+            matrices=ss.mla_matrices,
+            tokens=ss.tokens,
+        )
+        current_matrices = ss.mla_matrices
+    elif ss.flow_mode in ("mqa", "mqa_kv_cache"):
+        det_fig = mqa_detail_panel(
+            node_name=selected,
+            matrices=ss.mqa_matrices,
+            tokens=ss.tokens,
+        )
+        current_matrices = ss.mqa_matrices
+    elif ss.flow_mode == "mha_kv_cache":
+        det_fig = multi_head_detail_panel(
+            node_name=selected,
+            matrices=ss.multi_head_matrices,
+            tokens=ss.tokens,
+        )
+        current_matrices = ss.multi_head_matrices
+    elif ss.flow_mode == "kv_cache":
         det_fig = detail_panel(
             node_name=selected,
             matrices=ss.matrices,
